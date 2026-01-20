@@ -19,37 +19,48 @@ limitations under the License.
 
 The `fdo.sysconfig` FSIM enables configuration of essential system parameters during FDO device onboarding. This module provides a minimal, extensible mechanism for setting basic system configuration such as hostname, timezone, and time synchronization.
 
-This FSIM is designed to configure the minimum parameters needed to make a device "network-ready" after onboarding.
+This FSIM is designed to configure the minimum parameters needed to make a device "network-ready" after onboarding. It is intentionally scoped to **small key/value settings**; larger artifacts (certificates, configuration bundles, scripts) SHOULD be delivered via [`fdo.payload`](./fdo.payload.md), which can describe content using MIME types and chunked transport.
 
 ## Key-Value Pairs
 
 | FSIM Key | Direction | Value Type | Description |
 | -------- | --------- | ---------- | ----------- |
 | `fdo.sysconfig:active` | Bidirectional | `bool` | Module activation status |
-| `fdo.sysconfig:set` | Owner → Device | `SystemParam` | Set a system parameter |
-| `fdo.sysconfig:error` | Device → Owner | `uint` | Error code for failed operations |
+| `fdo.sysconfig:set` | Owner → Device | `SystemParam` | Set one or more small parameters inline |
+| `fdo.sysconfig:response` | Device → Owner | `Array` | Result array `[status, ?message]` per parameter |
+| `fdo.sysconfig:error` | Device → Owner | `uint` | Error indication for FSIM operation failures |
 
 ## Data Structures
 
 ### SystemParam
 
-The `SystemParam` structure represents a single system parameter to be configured:
+The `SystemParam` structure is a CBOR array (list) of key/value pairs. Each pair is exactly two elements: parameter name and parameter value. Multiple pairs MAY be carried in one `SystemParam` array.
 
-    SystemParam = {
-        parameter: tstr,  ; Parameter name (e.g., "hostname")
-        value: tstr       ; Parameter value (e.g., "device-001")
-    }
+    SystemParam = [
+        [ tstr parameter, tstr value ],
+        [ tstr parameter, tstr value ],
+        ...
+    ]
 
-**Fields:**
+**Notes:**
 
-- `parameter` (required): The parameter name as a string
-- `value` (required): The parameter value as a string
-
-Both parameter names and values are treated as opaque strings by the protocol. The device implementation is responsible for interpreting and applying them.
+- Each pair is always two CBOR text strings in positional order: index 0 = parameter name, index 1 = parameter value.
+- A single `fdo.sysconfig:set` message may carry one or more parameter pairs in the `SystemParam` array.
+- Parameter names/values are opaque to the protocol; the device interprets and applies them.
+- Using fixed-length arrays for pairs keeps encoding deterministic for ServiceInfo transport.
 
 ## Standard Parameters
 
-The following parameters are defined by this specification and MUST be supported by compliant implementations:
+| Parameter | Purpose | Typical Format |
+| --- | --- | --- |
+| `hostname` | Device identity on the network | Text hostname or FQDN |
+| `timezone` | Local clock configuration | IANA timezone string |
+| `ntp-server` | Time synchronization source | Hostname or IP address |
+| `locale` | Regional formats & character encoding | POSIX locale (e.g., `en_US.UTF-8`) |
+| `language` | UI/message language preference | ISO 639 / 639+3166 code |
+| `wifi` | Basic Wi-Fi network credentials | JSON object (SSID, auth) |
+
+These parameters are defined by this specification and MUST be supported by compliant implementations. Owners SHOULD restrict `fdo.sysconfig:set` payloads to short values; when the desired state requires larger data (cloud-init, PEM certificates, etc.), use `fdo.payload` with an appropriate MIME type instead.
 
 ### hostname
 
@@ -189,6 +200,7 @@ Configures WiFi network credentials for wireless connectivity.
 - Security type auto-detection allows devices to scan and determine appropriate settings
 - Implementations SHOULD support at least WPA2-PSK and open networks
 - Enterprise authentication (802.1X, RADIUS) is not covered by this parameter
+- This parameter exists purely for convenience during simple onboarding scenarios. If provisioning requires certificates, EAP credentials, Hotspot 2.0, or any advanced Wi-Fi workflows, owners MUST use the dedicated [`fdo.wifi-setup`](./fdo.wifi-setup.md) FSIM instead of `fdo.sysconfig:wifi`.
 
 **Security considerations:**
 
@@ -240,27 +252,42 @@ Instructs the device to set a system parameter.
 1. Device receives parameter name and value as opaque strings
 2. Device validates parameter name (known vs. unknown)
 3. Device applies parameter value using OS-specific mechanisms
-4. Device sends error if parameter cannot be applied
+4. Device sends `fdo.sysconfig:response` entries reflecting outcomes for each parameter in the message
 
-**Multiple Parameters**: Owner may send multiple `set` messages to configure multiple parameters. Each message configures one parameter.
+**Multiple Parameters**: Owner may send multiple parameters in one `set` message (as multiple pairs) or multiple `set` messages; responses are per-parameter.
 
-### fdo.sysconfig:error
+### fdo.sysconfig:response
 
 **Direction**: Device → Owner
 
-Reports an error when a parameter cannot be set.
+Reports the outcome of applying one or more parameters. One response entry per parameter in the corresponding `fdo.sysconfig:set`. Follows the generic `*-result` array format from the chunking strategy:
 
-**Value**: Unsigned integer error code
+    SysconfigResponse = [
+        code: uint,        ; 0=success, 1=warning, 2=error
+        ? message: tstr    ; optional human-readable note (warnings/errors)
+    ]
 
-**Error Codes**:
+**Status Code Semantics**:
 
-| Code | Description | Meaning |
-| ---- | ----------- | ------- |
-| 1 | Unknown parameter | Parameter name not recognized |
-| 2 | Invalid value | Value format is invalid for this parameter |
-| 3 | Permission denied | Insufficient permissions to set parameter |
-| 4 | Operation failed | System operation failed (e.g., file write error) |
-| 5 | Not supported | Parameter recognized but not supported on this device |
+- `code = 0` (success): Parameter was successfully applied and is usable
+- `code = 1` (warning): Parameter was applied but with warnings (e.g., partial application); parameter is usable
+- `code = 2` (error): Parameter was NOT applied; parameter is unusable and should not be considered applied
+
+**Message Field**:
+
+- `message` (optional): Human-readable status description
+  - For `code = 0`: MAY be omitted or contain success details
+  - For `code = 1`: SHOULD describe the warning condition
+  - For `code = 2`: SHOULD describe the failure cause
+
+**Mapping examples (non-normative)**:
+
+- Unknown parameter → `code=2`, message "unknown parameter" (NOT applied)
+- Invalid value → `code=2`, message "invalid value" (NOT applied)
+- Permission denied → `code=2`, message "permission denied" (NOT applied)
+- Partial application → `code=1`, message "applied with fallback" (WAS applied)
+- Not supported but fallback applied → `code=1`, message "using default value" (WAS applied)
+- Not supported, no fallback → `code=2`, message "not supported" (NOT applied)
 
 ## Example Message Exchange
 
@@ -304,9 +331,46 @@ Reports an error when a parameter cannot be set.
       value: "some-value"
     }
 
-**Device → Owner**: Report error
+**Device → Owner**: Report error in response
 
-    fdo.sysconfig:error = 1  // Unknown parameter
+    fdo.sysconfig:response = [2, "unknown parameter"]
+
+### fdo.sysconfig:error
+
+**Direction**: Device → Owner
+
+Reports an error during FSIM operation (distinct from per-parameter response codes).
+
+**CBOR Structure**: Unsigned integer error code
+
+**Error Codes**:
+
+- `1`: Module not supported
+- `2`: Invalid request format
+- `3`: Internal device error
+
+**Processing**:
+
+- Can be sent if the device cannot process the `fdo.sysconfig:set` message at all
+- Terminates the current parameter setting operation
+- Owner should not send more parameters after receiving error
+
+### Sequence Diagrams
+
+#### Basic Parameter Setting
+
+    Owner                           Device
+      |                               |
+      | fdo.sysconfig:active(true)    |
+      |------------------------------>|
+      |                               | Activate module
+      |                               |
+      | fdo.sysconfig:set(params)     |
+      |------------------------------>|
+      |                               | Validate & apply parameters
+      |                               |
+      | fdo.sysconfig:response(codes) |
+      |<------------------------------|
 
 ## Security Considerations
 
@@ -408,13 +472,6 @@ This specification intentionally limits the standard parameter set to avoid:
 
 Additional parameters can be added through vendor-specific extensions or future specification revisions.
 
-## Future Extensions
+### Large Configuration Guidance
 
-Potential future standard parameters (informative, not normative):
-
-- `dns-server`: DNS server configuration
-- `syslog-server`: Remote syslog server
-- `proxy-server`: HTTP/HTTPS proxy configuration
-- `keyboard-layout`: Console keyboard layout
-
-These may be standardized in future revisions based on implementation experience and user requirements.
+`fdo.sysconfig` deliberately does **not** support chunking. Devices MAY reject oversized values (e.g., >1 KB) and instruct the owner to resend the material via `fdo.payload` with an appropriate MIME type (cloud-init, PEM, JSON template, etc.). This keeps `fdo.sysconfig` lightweight and focused on the core parameter set while providing a clear upgrade path for richer configuration flows.
