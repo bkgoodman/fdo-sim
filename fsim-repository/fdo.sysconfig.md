@@ -1,6 +1,6 @@
 # fdo.sysconfig - System Configuration FSIM
 
-Copyright &copy; 2024 FIDO Alliance & Dell Technologies
+Copyright &copy; 2026 Dell Technologies and FIDO Alliance
 Author: Brad Goodman, Dell Technologies
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -430,16 +430,16 @@ This specification intentionally leaves implementation details to the device:
 
 The `fdo.sysconfig` FSIM complements other configuration FSIMs:
 
-- **fdo.ssh**: Configures SSH access (authentication)
 - **fdo.sysconfig**: Configures basic system parameters (identity, time)
 - **fdo.csr**: Configures certificates (security credentials)
+- **fdo.payload**: Delivers arbitrary payloads (scripts, configs, SSH keys)
 
 Together, these FSIMs provide the minimum configuration for a network-ready device:
 
 1. Identity (hostname via `fdo.sysconfig`)
 2. Time synchronization (timezone, NTP via `fdo.sysconfig`)
-3. Remote access (SSH keys via `fdo.ssh`)
-4. Security credentials (certificates via `fdo.csr`)
+3. Security credentials (certificates via `fdo.csr`)
+4. Advanced configuration (SSH keys, scripts via `fdo.payload`)
 
 ## Design Rationale
 
