@@ -359,6 +359,8 @@ For `application/x-uefi-db-cert` and `application/x-uefi-dbx-cert`, the payload 
 
 For `application/x-uefi-dbx-hash`, the payload is a raw SHA-256 hash (32 bytes) of the image to be blocked.
 
+If a certificate or hash is received by a device which is already configured on it, the device SHALL return good status (even if it would not actaully add the duplicate entry).
+
 #### Security Considerations for DB/DBX Modification
 
 **DB Enrollment** (`application/x-uefi-db-cert`):
@@ -624,3 +626,7 @@ The image is delivered over the FDO TO2 encrypted channel from an authenticated 
 - Log image metadata for audit purposes
 - Verify image signatures when applicable
 - Reject images that fail integrity checks
+
+## Future Conciderations
+
+Considering adding a command to read/list contents of EFI DB/DBX, so an onboarding service may assess suitability of a system.
