@@ -338,13 +338,13 @@ Unknown parameters MUST be rejected with an error response.
 
 ### UEFI Secure Boot Database Operations
 
-These image types enable enrollment of certificates into UEFI Secure Boot databases. Firmware that does not support database modification SHOULD NAK these with error code 7 (DB Modification Not Supported).
+These image types enable enrollment of certificates and hashes into UEFI Secure Boot databases. Firmware that does not support database modification SHOULD NAK these with error code 7 (DB Modification Not Supported).
 
 | MIME Type | Description |
 |-----------|-------------|
 | `application/x-uefi-db-cert` | Enroll certificate into Secure Boot DB (allowed signatures) |
+| `application/x-uefi-db-hash` | Enroll image hash into Secure Boot DB (whitelist a specific binary) |
 | `application/x-uefi-dbx-hash` | Enroll hash into Secure Boot DBX (forbidden signatures) |
-| `application/x-uefi-dbx-cert` | Enroll certificate into Secure Boot DBX (revoked certificates) |
 
 #### DB vs DBX
 
@@ -353,27 +353,27 @@ These image types enable enrollment of certificates into UEFI Secure Boot databa
 | **DB** | Allowed Signature Database | Certificates/hashes that ARE trusted for boot | Enroll enterprise signing cert to allow custom EFI apps |
 | **DBX** | Forbidden Signature Database | Certificates/hashes that are REVOKED/blocked | Revoke compromised bootloaders, block known-bad hashes |
 
-#### Certificate Enrollment Payload Format
+#### Enrollment Payload Format
 
-For `application/x-uefi-db-cert` and `application/x-uefi-dbx-cert`, the payload is a DER-encoded X.509 certificate.
-
-For `application/x-uefi-dbx-hash`, the payload is a raw SHA-256 hash (32 bytes) of the image to be blocked.
+- `application/x-uefi-db-cert`: DER-encoded X.509 certificate to trust.
+- `application/x-uefi-db-hash`: Raw SHA-256 hash (32 bytes) of the executable to whitelist.
+- `application/x-uefi-dbx-hash`: Raw SHA-256 hash (32 bytes) of the image to be blocked.
 
 If a certificate or hash is received by a device which is already configured on it, the device SHALL return good status (even if it would not actaully add the duplicate entry).
 
 #### Security Considerations for DB/DBX Modification
 
-**DB Enrollment** (`application/x-uefi-db-cert`):
+**DB Enrollment** (`application/x-uefi-db-cert`, `application/x-uefi-db-hash`):
 
-- Adds a trusted signing certificate
-- Images signed by this certificate will be allowed to boot
-- **Risk**: Enrolling an untrusted cert allows arbitrary code execution
+- Adds a trusted signing certificate or whitelists a specific image hash
+- Images signed by the enrolled cert or matching the hash will be allowed to boot
+- **Risk**: Enrolling untrusted material allows arbitrary code execution
 - **Mitigation**: FDO channel is authenticated; only legitimate owner can enroll
 
-**DBX Enrollment** (`application/x-uefi-dbx-hash`, `application/x-uefi-dbx-cert`):
+**DBX Enrollment** (`application/x-uefi-dbx-hash`):
 
-- Blocks specific hashes or revokes certificates
-- Prevents boot of images matching the hash or signed by the revoked cert
+- Blocks specific hashes from booting
+- Prevents boot of images matching the hash
 - **Risk**: Incorrect DBX entry could brick the device (block legitimate bootloader)
 - **Mitigation**: Firmware SHOULD validate that at least one valid boot path remains
 

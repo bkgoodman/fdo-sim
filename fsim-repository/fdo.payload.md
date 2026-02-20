@@ -96,9 +96,9 @@ Payload transfers use the generic `payload-begin` map from the chunking strategy
       -1: "application/x-sh",       / mime_type (required) /
       -2: "setup.sh",               / payload name (optional) /
       -3: {                         / payload metadata (optional) /
-        "description": "Initial setup script",
-        "version": "1.0"
-      }
+        "description": "Initial setup script"
+      },
+      -4: "1.0"                     / version (optional) /
     }
 
 #### PayloadBegin Schema Extensions
@@ -107,7 +107,8 @@ Payload transfers use the generic `payload-begin` map from the chunking strategy
 | --- | ---- | ---- | ----------- | ----------- |
 | `-1` | mime_type | tstr | **Required** | MIME type of the payload; devices MUST validate support before accepting data. |
 | `-2` | name | tstr | Optional | Descriptive name for the payload (e.g., filename). |
-| `-3` | metadata | map | Optional | Additional FSIM-defined metadata (version, description, etc.). |
+| `-3` | metadata | map | Optional | Additional FSIM-defined metadata (description, etc.). |
+| `-4` | version | tstr | Optional | Version string for the payload content. Devices MAY use this to determine whether the payload has already been applied (see [Version-Based Payload Rejection](#version-based-payload-rejection)). |
 
 All non-negative keys remain reserved for the generic chunking fields (`total_size`, `hash_alg`, etc.) as documented in `chunking-strategy.md`.
 
@@ -130,6 +131,7 @@ Devices MUST send `fdo.payload:payload-result` after processing the payload. It 
 - `status_code = 0` (success): Payload was successfully applied and is usable
 - `status_code = 1` (warning): Payload was applied but with warnings (e.g., partial execution); payload is usable
 - `status_code = 2` (error): Payload was NOT applied; payload is unusable and should not be considered applied
+- `status_code = 3` (session restart): Payload was successfully applied, but the device will terminate the current TO2 session and initiate a new one. This is used when the payload requires the device to restart its FDO client process (e.g., after a client software update). Owners SHOULD expect the TO2 session to end gracefully after receiving this status and SHOULD anticipate a new TO2 session from the updated device. Owners SHOULD NOT treat this as an error.
 
 Owners SHOULD treat `status_code = 2` as a failure and consult `fdo.payload:error` for detailed diagnostics when provided.
 
@@ -208,6 +210,7 @@ PayloadAck = [
 | 2 | Size Exceeded | Payload too large for available resources |
 | 3 | Not Applicable | Payload not relevant to this client/phase |
 | 4 | Policy Violation | Security policy prevents acceptance |
+| 5 | Already Current | Device has already applied this payload version; no update needed (see [Version-Based Payload Rejection](#version-based-payload-rejection)) |
 
 **Example - Rejecting Boot Image in OS Context**:
 
@@ -312,6 +315,17 @@ The following MIME types are **non-normative** examples of formats a device MAY 
 - `application/vnd.docker.distribution.manifest.v2+json` - Docker manifest
 - `application/vnd.kubernetes.yaml` - Kubernetes manifest
 
+### OS Package Managers
+
+These MIME types signal that the payload is a native operating-system package and SHOULD be installed via the platform's package manager rather than manually unpacked. Devices advertising support for this category MUST run the corresponding install command (e.g., `apt`, `dnf`, `yum`, `zypper`) or an equivalent transactional package API.
+
+- `application/vnd.debian.binary-package` - Debian-family package (.deb) intended to be installed via `dpkg`/`apt`
+- `application/x-rpm` - RPM package (.rpm) to be installed via `rpm`/`dnf`/`yum`
+- `application/vnd.flatpak.ref` - Flatpak reference file (optional, for desktop-class targets)
+- `application/vnd.snap.package` - Snap package (optional, when snapd is available)
+
+Owners MAY include package metadata in the `payload-begin` map to indicate target repositories or installation flags. Devices SHOULD reject packages whose signatures or repositories are untrusted.
+
 ### Boot Images and EFI Applications
 
 These types support Bare Metal Orchestration (BMO) and OS installation scenarios where firmware or BIOS/UEFI receives bootable images via FDO:
@@ -333,6 +347,141 @@ Vendors may define custom MIME types using the `application/vnd.` prefix:
 
 - `application/vnd.company.config+json`
 - `application/vnd.vendor.firmware+bin`
+
+## Version-Based Payload Rejection
+
+The optional `version` field (key `-4`) in `payload-begin` enables devices to reject payloads that have already been applied, avoiding redundant processing. This mechanism is useful for any payload type — not just client updates — where the device can determine that a specific version of content is already present.
+
+### Mechanism
+
+When an owner includes `version` in `payload-begin` and sets `require_ack: true`, the device MAY compare the offered version against its own state for that MIME type. If the device determines the payload content at that version has already been applied, it SHOULD reject the payload with reason code 5 ("Already Current"):
+
+```
+Owner → Device: fdo.payload:payload-begin {
+  0: 102400,
+  3: true,
+  -1: "application/x-rpm",
+  -2: "monitoring-agent-2.1.0.rpm",
+  -4: "2.1.0"
+}
+Device → Owner: fdo.payload:payload-ack [false, 5, "monitoring-agent 2.1.0 already installed"]
+```
+
+Owners SHOULD treat reason code 5 as a successful outcome (the desired state is already achieved) and proceed with subsequent payloads or FSIMs.
+
+### Applicability
+
+Version-based rejection is entirely optional and implementation-specific. Examples of where it applies:
+
+- **OS packages**: Device checks whether the named package at the offered version is already installed
+- **Configuration files**: Device compares a version tag or checksum against what is currently deployed
+- **Client software updates**: Device compares its own version against the offered version (see [Client Update Payloads](#client-update-payloads))
+- **Firmware images**: Device checks its current firmware version
+
+The interpretation of the `version` string is MIME-type-specific and left to the device's payload handler. Devices that do not implement version checking simply ignore the field and accept or reject the payload based on other criteria.
+
+### Idempotency Considerations
+
+Device implementations MUST accurately determine whether a payload version is truly "already current." An incorrect determination that a payload is always new will cause redundant processing on every onboarding attempt. Conversely, an incorrect determination that a payload is already applied may skip a necessary update. When in doubt, devices SHOULD accept the payload.
+
+## Client Update Payloads (Non-Normative)
+
+This section provides guidance for using `fdo.payload` to deliver updates to the FDO client software itself. Because client implementations vary across vendors and platforms, this mechanism relies on vendor-specific MIME types and the existing payload acknowledgment and versioning features described above.
+
+### Motivation
+
+Onboarding services may need to update the FDO client (code and/or configuration) on a device before proceeding with normal onboarding. For example, a fleet management system may require all devices to run a minimum client version before applying security policies or installing workloads.
+
+### Design Principles
+
+- **Vendor-specific MIME types**: Client update payloads use vendor-defined MIME types (e.g., `application/vnd.xyzco.fdo-client-update`) so that only the target client implementation recognizes and accepts them. Other FDO client implementations will NAK the payload with reason code 1 ("Unsupported MIME Type"), which is the correct and expected behavior.
+
+- **Ordering**: Onboarding services SHOULD send client update payloads **before** any other FSIMs or payloads. Since the server controls FSIM ordering, this is an implementation decision for the onboarding service — no protocol-level priority mechanism is needed. This ensures the client is updated before any subsequent onboarding actions that depend on the updated client.
+
+- **Atomicity**: Client update payloads SHOULD be delivered as a **single atomic payload** containing both code and configuration changes. This avoids partial-update states where, for example, new code is installed but old configuration is still active, or vice versa. The internal structure of this atomic bundle is entirely vendor-defined.
+
+- **Version checking**: Owners SHOULD include the `version` field (key `-4`) in `payload-begin` for client update payloads. The client SHOULD compare this against its current version and NAK with reason code 5 ("Already Current") if no update is needed. This is the **critical mechanism** that prevents infinite update-restart loops.
+
+- **Session restart after update**: After successfully applying a client update, the device sends `payload-result` with `status_code = 3` ("Session Restart") and terminates the TO2 session. The updated client then initiates a fresh TO2 session. On the subsequent session, the onboarding service offers the same client update payload, the now-updated client NAKs it as "Already Current," and normal onboarding proceeds.
+
+### Protocol Flow: Client Update Needed
+
+```
+    Owner (Onboarding Service)          Device (FDO Client v1.0)
+      |                                   |
+      |  payload-begin {                  |
+      |    3: true,                       |
+      |    -1: "application/vnd.xyzco.fdo-client-update",
+      |    -4: "2.0"                      |
+      |  }                                |
+      |---------------------------------->|
+      |                                   | Check: current version is 1.0,
+      |                                   | offered version is 2.0 → accept
+      |  payload-ack [true]               |
+      |<----------------------------------|
+      |                                   |
+      |  payload-data-0..N                |
+      |---------------------------------->|
+      |                                   |
+      |  payload-end                      |
+      |---------------------------------->|
+      |                                   | Apply update atomically
+      |  payload-result [3, "Client updated to 2.0, restarting"]
+      |<----------------------------------|
+      |                                   |
+      |  [TO2 session ends]               |
+      |                                   | [Client restarts as v2.0]
+      |                                   | [New TO2 session begins]
+      |                                   |
+```
+
+### Protocol Flow: Client Already Current
+
+```
+    Owner (Onboarding Service)          Device (FDO Client v2.0)
+      |                                   |
+      |  payload-begin {                  |
+      |    3: true,                       |
+      |    -1: "application/vnd.xyzco.fdo-client-update",
+      |    -4: "2.0"                      |
+      |  }                                |
+      |---------------------------------->|
+      |                                   | Check: current version is 2.0,
+      |                                   | offered version is 2.0 → already current
+      |  payload-ack [false, 5, "Already at version 2.0"]
+      |<----------------------------------|
+      |                                   |
+      |  [Owner proceeds to next FSIM/payload - normal onboarding continues]
+      |                                   |
+```
+
+### Protocol Flow: Different Client Implementation
+
+```
+    Owner (Onboarding Service)          Device (Different Vendor Client)
+      |                                   |
+      |  payload-begin {                  |
+      |    3: true,                       |
+      |    -1: "application/vnd.xyzco.fdo-client-update",
+      |    -4: "2.0"                      |
+      |  }                                |
+      |---------------------------------->|
+      |                                   | Check: MIME type not recognized
+      |  payload-ack [false, 1, "Unsupported MIME type"]
+      |<----------------------------------|
+      |                                   |
+      |  [Owner proceeds to next FSIM/payload - normal onboarding continues]
+      |                                   |
+```
+
+### Avoiding Infinite Restart Loops
+
+The combination of version checking and the "Already Current" NAK code prevents infinite loops:
+
+1. **First TO2 session**: Client is at v1.0, server offers v2.0 → client accepts, applies, sends `status_code = 3`, restarts
+2. **Second TO2 session**: Client is now at v2.0, server offers v2.0 → client NAKs with code 5 ("Already Current") → onboarding proceeds
+
+If the client incorrectly determines that every offered payload is new (i.e., never returns "Already Current"), it will enter an infinite restart loop. Client implementations MUST take care to implement accurate version comparison logic.
 
 ## Protocol Flow
 
