@@ -93,6 +93,7 @@ Payload transfers use the generic `payload-begin` map from the chunking strategy
     {
       0: 4096,                      / total_size per chunk spec /
       1: "sha256",                  / optional hash algorithm /
+      4: 600,                       / estimated_duration (seconds, advisory) /
       -1: "application/x-sh",       / mime_type (required) /
       -2: "setup.sh",               / payload name (optional) /
       -3: {                         / payload metadata (optional) /
@@ -110,7 +111,7 @@ Payload transfers use the generic `payload-begin` map from the chunking strategy
 | `-3` | metadata | map | Optional | Additional FSIM-defined metadata (description, etc.). |
 | `-4` | version | tstr | Optional | Version string for the payload content. Devices MAY use this to determine whether the payload has already been applied (see [Version-Based Payload Rejection](#version-based-payload-rejection)). |
 
-All non-negative keys remain reserved for the generic chunking fields (`total_size`, `hash_alg`, etc.) as documented in `chunking-strategy.md`.
+All non-negative keys remain reserved for the generic chunking fields (`total_size`, `hash_alg`, `require_ack`, `estimated_duration`, etc.) as documented in `chunking-strategy.md`. In particular, senders of large payloads (e.g., ISO images) SHOULD include `estimated_duration` (key `4`) so that devices can adjust internal watchdog timers to avoid spurious resets during long transfers.
 
 ### PayloadResult
 

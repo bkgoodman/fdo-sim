@@ -26,6 +26,7 @@ The `*-begin` value is a CBOR map that uses small unsigned integer keys for comp
 | 1 | `hash_alg` | `tstr` | Hash algorithm identifier (e.g., `"sha256"`, `"sha384"`). |
 | 2 | `metadata` | `map` | Optional FSIM-specific metadata (format undefined at this layer). |
 | 3 | `require_ack` | `bool` | If true, sender waits for `*-ack` before sending data chunks. See [Acknowledgment Gate](#acknowledgment-gate). |
+| 4 | `estimated_duration` | `uint` | Advisory: estimated seconds for the complete transfer and application of this payload. See [Estimated Duration](#estimated-duration). |
 
 Reserved Key Policy:
 
@@ -39,7 +40,8 @@ payload-begin = {
   ? 0: uint,        ; total_size
   ? 1: tstr,        ; hash_alg
   ? 2: any,         ; metadata map (FSIM-defined)
-  ? 3: bool         ; require_ack
+  ? 3: bool,        ; require_ack
+  ? 4: uint          ; estimated_duration (seconds, advisory)
 }
 ```
 
@@ -100,6 +102,29 @@ payload-end = {
 - If `total_size` is provided and the receiver observes more bytes than announced, it MUST treat the transfer as invalid.
 - When `total_size` is omitted, receivers rely solely on `*-end` to determine completion.
 - If the byte count at completion does not match the declared `total_size`, the discrepancy MUST be treated as the same protocol-level TO2 error described above.
+
+## Estimated Duration
+
+The `estimated_duration` field (key `4`) is an **advisory** hint from the sender indicating approximately how many seconds the complete operation — transfer *plus* application — is expected to take.
+
+### Motivation
+
+Devices often run internal watchdog timers during onboarding to recover from hangs. A hardcoded watchdog value that works for small payloads can cause spurious resets during large transfers (e.g., a 2.8 GiB ISO image over a slow link), producing silent failures that look like hardware or network problems. The `estimated_duration` field lets the sender communicate its best estimate so the receiver can adjust its watchdog or progress-tracking accordingly.
+
+### Semantics
+
+- **Advisory only.** Receivers MAY ignore this field entirely.
+- A value of `0`, or omission of the key, means "no estimate provided." Receivers MUST fall back to their own default timeout policy.
+- The value represents the sender's best guess at **total wall-clock seconds** from `*-begin` to completion of any post-transfer processing (e.g., running an installer). It accounts for both transfer time (payload size / expected link speed) and application time.
+- Receivers that choose to use this field SHOULD apply a safety margin (e.g., double the value) before using it to set a watchdog or timeout.
+- The estimate has two components that different parties may know best:
+  - **Application time**: how long the device takes to process the payload after receiving it (known by the payload author).
+  - **Transfer time**: how long it takes to deliver the payload over the wire (known by the operator who understands the network conditions).
+  - The sender SHOULD combine both into a single conservative estimate.
+
+### Example
+
+A 2.8 GiB ISO image on a 100 Mbit/s link takes approximately 240 seconds to transfer. The Ubuntu installer takes approximately 300 seconds to run. The sender might set `estimated_duration` to `600` (10 minutes). A device with a default 1800-second watchdog would keep its existing timeout. A device with a 300-second watchdog would extend it to `1200` (600 x 2 safety margin).
 
 ## Error Handling
 

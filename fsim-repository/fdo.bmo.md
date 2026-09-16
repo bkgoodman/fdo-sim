@@ -84,6 +84,26 @@ This ensures that:
 - **The best available option is used** (first in preference order)
 - **No unnecessary transfers occur** after successful boot
 
+#### No-Op Completion
+
+The converse of termination-by-boot is the case where TO2 completes successfully but **nothing was installed, booted, or configured**. This occurs when the Owner holds the device's voucher but has no provisioning content to deliver — no boot asset, no BIOS parameters — and therefore activates no module that performs work.
+
+By the letter of the FDO protocol this is a *successful* TO2: mutual authentication succeeded, the ServiceInfo exchange completed, and `Done`/`Done2` were exchanged. Treating that as "onboarding complete" is wrong, because the device is in **exactly the state it started in**.
+
+**Normative rule**: A device MUST NOT record onboarding as complete on the basis of TO2 protocol success alone. Completion is a function of **work performed**, not protocol outcome.
+
+Specifically, an implementation of this module:
+
+- MUST track whether any BMO operation actually took effect during the session — an image accepted and chainloaded, or at least one `set` parameter successfully applied.
+- MUST NOT set any persistent "onboarding complete" indicator if no such operation occurred.
+- SHOULD treat the session as a **no-op** and re-attempt onboarding, subject to the platform's normal retry policy.
+
+This rule is decidable locally: the firmware always knows whether it chainloaded an asset or mutated a BIOS setting.
+
+**Why this belongs in `fdo.bmo` specifically.** This module is the pre-OS, firmware-resident case. A device in this state typically has no OS installed and has FDO boot as its only viable boot target, so the platform's ordinary boot path leads back into FDO on the next power cycle. Making the no-op rule explicit turns that from accidental behavior into specified behavior, and prevents an implementation from recording spurious completion and thereby stranding the machine with no bootable target.
+
+**Relationship to deferred onboarding.** Where the Owner knows it will have content *later*, it should say so explicitly via the [`fdo.defer`](fdo.defer.md) module rather than relying on this fallback. The no-op rule remains the required safety net for devices that do not implement `fdo.defer`, for Owners that send no directive at all, and for deferrals that are never resolved — in all three cases the device falls back to "nothing happened, try again."
+
 #### Implementation Benefits
 
 This multi-asset approach provides:
@@ -484,6 +504,7 @@ The wire-level `fdo.bmo:image-begin` message body is a tagged `COSE_Sign1` (CBOR
 {
   0: 524288000,                    / total_size: 500MB ISO /
   1: "sha256",                     / hash algorithm /
+  4: 3600,                         / estimated_duration (seconds, advisory) /
   -1: "application/x-iso9660-image", / image_type (required) /
   -2: "inst.ks=http://... quiet",  / boot_args (optional) /
   -3: "rhel-9.3-installer.iso",   / name (optional) /
@@ -512,6 +533,7 @@ The wire-level `fdo.bmo:image-begin` message body is a tagged `COSE_Sign1` (CBOR
 - Only `image_type` is required; all other fields are optional
 - `boot_args` is the most commonly used optional field - it passes kernel command line arguments (e.g., kickstart URLs, installer options)
 - `name`, `version`, and `description` are informational only - implementations may log them but are not required to act on them
+- `estimated_duration` (key `4`, from the generic chunking spec) is especially relevant for `fdo.bmo` because firmware-stage transfers often involve large boot images (multi-GiB ISOs) over constrained links, and UEFI watchdog timers are typically more aggressive than OS-level timeouts. Owners SHOULD include this field for any image expected to take longer than a few minutes to transfer and apply. See `chunking-strategy.md` [Estimated Duration](chunking-strategy.md#estimated-duration).
 - `tls_ca` is a **single certificate** (root or intermediate CA), not a chain. This mirrors UEFI Secure Boot DB behavior where individual certificates are enrolled. Chain validation occurs at TLS handshake time using the provided CA as trust anchor.
 - When `delivery_mode` is 0 (inline) or omitted, the existing chunked transfer behavior applies
 - When `delivery_mode` is 1 or 2, no `image-data-*` chunks are sent; the device fetches from the URL after `image-end`
@@ -1259,6 +1281,7 @@ Owner                           Device (Firmware)
 - Validate BIOS parameter names and values before applying
 - Return appropriate response codes for each BIOS parameter
 - NAK with error code 14 if `delivery_mode` is not supported
+- **Treat a TO2 session in which no image was booted and no BIOS parameter was applied as a no-op; MUST NOT record onboarding as complete on the basis of TO2 protocol success alone (see [No-Op Completion](#no-op-completion))**
 
 **SHOULD**:
 
