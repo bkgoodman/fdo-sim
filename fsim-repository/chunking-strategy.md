@@ -159,6 +159,18 @@ payload-result = [
 - Interpretation of `status_code`/`message` is FSIM-specific; e.g., "setting not applied" or "certificate rejected" are defined by that FSIM's spec.
 - These `*-result` errors MUST NOT be confused with the generic FDO TO2 ServiceInfoModule error mechanism, which is reserved for protocol-level failures (timeouts, transport errors, etc.). Use TO2 errors only when the entire ServiceInfo exchange is compromised, not when a specific FSIM payload fails validation.
 
+### Result Is Terminal
+
+`*-result` MUST be the last message of a transfer. Any supplementary messages the receiver wishes to send — notably [diagnostic payloads](#diagnostic-payloads) — MUST be sent *before* it.
+
+### Completion Ordering
+
+**A sender MUST NOT signal module completion until the receiver's `*-result` has been received, or a local timeout has expired.**
+
+This rule exists because FDO routes an incoming ServiceInfo key to the module that is currently active on the receiving side. A sender that declares itself finished as soon as it has transmitted `*-end` may cause the peer's subsequent `*-result` to arrive after the module has been torn down, where it is discarded — silently, in most implementations. The failure is timing-dependent and most likely precisely when the result is most valuable, since a receiver that must apply a payload before reporting on it takes longest to respond when something has gone wrong.
+
+Senders SHOULD apply a bounded timeout while awaiting `*-result` rather than waiting indefinitely, and SHOULD log its expiry.
+
 ## Acknowledgment Gate
 
 Some transfers benefit from explicit acceptance before data transmission begins. This is particularly useful when:
@@ -244,6 +256,67 @@ type PayloadHandler interface {
 ```
 
 This allows application code to inspect MIME types, sizes, or other metadata and reject transfers that don't apply to the current execution context.
+
+## Diagnostic Payloads
+
+`*-result` carries a status code and an optional `message` string, and that message is bounded by the negotiated ServiceInfo MTU. The MTU floor is small, and implementations generally treat an oversized ServiceInfo array as a hard error rather than truncating it — so an overlong diagnostic does not merely get clipped, it fails the exchange. That makes `*-result` unsuitable for anything larger than a single-line summary.
+
+Where a receiver needs to return substantial diagnostic output — installer logs, interpreter tracebacks, validation reports, command output — FSIMs SHOULD define a `*-log` payload transferred using the **same chunking mechanism in the reverse direction**.
+
+Nothing in this document is direction-specific: `*-begin` / `*-data-<n>` / `*-end` are defined in terms of *sender* and *receiver*, not owner and device. A diagnostic transfer simply inverts those roles — the receiver of the primary payload becomes the sender of the log.
+
+### Requirements
+
+- The `*-log` transfer MUST follow the ordinary begin/data/end rules defined above.
+- It MUST be sent **before** `*-result`, which remains the terminal message of the transfer (see [Result Is Terminal](#result-is-terminal)).
+- The log sender SHOULD set `require_ack` in `*-log-begin`, allowing the peer to decline the transfer before any data is sent. Diagnostic output can be far larger than the payload that produced it, and a peer that will not retain it should not pay to receive it.
+- A peer that does not wish to receive the log responds `*-log-ack [false, 5]` (Diagnostics Not Requested). The log sender MUST then proceed directly to `*-result`.
+- Logs are supplementary. A device that cannot afford a chunked upload MUST still report `*-result` correctly. Implementations MUST NOT depend on the log transfer to determine success or failure.
+
+### Begin Metadata
+
+The `*-log-begin` message uses only the generic keys defined in [Begin Message Structure](#begin-message-structure). Log-specific attributes travel in the `metadata` map (key 2):
+
+| Metadata key | Type | Description |
+| ------------ | ---- | ----------- |
+| `content_type` | `tstr` | MIME type of the log, e.g. `"text/plain"`, `"application/json"`. Defaults to `"text/plain"` when absent. |
+| `truncated` | `bool` | True if the sender truncated the output to fit a local size cap. |
+| `source` | `tstr` | Origin of the output, e.g. `"stderr"`, `"journal"`, `"installer"`. |
+
+### Rejection Reason Code
+
+This specification reserves one additional `*-ack` reason code for use with diagnostic transfers:
+
+| Code | Meaning |
+| ---- | ------- |
+| 5 | Diagnostics not requested — the peer does not want the log |
+
+### Protocol Flow
+
+```text
+Owner → Device: payload-begin { ... }
+Owner → Device: payload-data-0 .. payload-data-N
+Owner → Device: payload-end { 1: h'...' }
+
+; Device applied the payload and failed; it has 40 KB of installer output
+Device → Owner: payload-log-begin { 0: 40960, 1: "sha256", 3: true,
+                                    2: { "content_type": "text/plain",
+                                         "source": "installer" } }
+Owner → Device: payload-log-ack [true]
+Device → Owner: payload-log-data-0 .. payload-log-data-N
+Device → Owner: payload-log-end { 1: h'...' }
+
+; Result last, and terminal
+Device → Owner: payload-result [2, "autoinstall failed; see log"]
+```
+
+Declined:
+
+```text
+Device → Owner: payload-log-begin { 0: 40960, 3: true, ... }
+Owner → Device: payload-log-ack [false, 5, "Diagnostics not collected"]
+Device → Owner: payload-result [2, "autoinstall failed"]
+```
 
 ## Integration Notes
 

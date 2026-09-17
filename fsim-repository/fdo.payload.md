@@ -80,6 +80,10 @@ The MIME type (`mime_type` in `fdo.payload`, `image_type` in `fdo.bmo`) provides
 | `fdo.payload:payload-ack` | Device → Owner | Array | Accept/reject payload before transfer (when `require_ack` is set) |
 | `fdo.payload:payload-data-<n>` | Owner → Device | Byte string | Payload data chunk `n` (0-based) |
 | `fdo.payload:payload-end` | Owner → Device | Map | Signals completion of payload transfer |
+| `fdo.payload:payload-log-begin` | Device → Owner | Map | Announces a diagnostic log transfer (per chunking strategy) |
+| `fdo.payload:payload-log-ack` | Owner → Device | Array | Accept/reject the log before transfer |
+| `fdo.payload:payload-log-data-<n>` | Device → Owner | Byte string | Log data chunk `n` (0-based) |
+| `fdo.payload:payload-log-end` | Device → Owner | Map | Signals completion of the log transfer |
 | `fdo.payload:payload-result` | Device → Owner | Array | Final result with status/message |
 | `fdo.payload:error` | Device → Owner | Object | Error during transfer |
 <!-- markdownlint-enable MD033 -->
@@ -258,11 +262,43 @@ Sends payload chunk `n` (0-based). Chunks MUST follow the same size guidelines a
 
 Signals completion of the payload transfer. Owners SHOULD provide a hash in the `payload-end` map when a `hash_alg` was advertised in `payload-begin`. Devices MUST verify the hash when present before applying the payload.
 
+### fdo.payload:payload-log-\*
+
+**Direction**: Device → Owner (`payload-log-ack` is Owner → Device)
+
+Transfers diagnostic output produced while applying the payload — installer logs, interpreter tracebacks, validation reports. This is a [diagnostic payload](chunking-strategy.md#diagnostic-payloads): the ordinary chunking mechanism with the roles reversed, the device acting as sender.
+
+The `message` field of `payload-result` is bounded by the negotiated MTU and is intended for a one-line summary. Anything larger belongs here.
+
+**Ordering**: the log transfer MUST complete before `payload-result` is sent. `payload-result` remains the terminal message of the exchange.
+
+**Acknowledgment**: devices SHOULD set `require_ack` in `payload-log-begin`. An owner that does not collect diagnostics replies `payload-log-ack [false, 5, ...]` and the device proceeds directly to `payload-result`.
+
+**Metadata**: log attributes travel in the generic `metadata` map (key 2) — `content_type`, `truncated`, `source` — as defined in the chunking strategy.
+
+**Relationship to `fdo.payload:error`**: `error` is a compact structured code for *why* a transfer failed; `payload-log-*` carries the unstructured evidence. They are complementary, and a device MAY send both.
+
+Devices SHOULD send a log whenever `payload-result` reports status 1 (warning) or 2 (error). Devices MAY send one on success where the output has operational value. Owners MUST NOT treat the presence or absence of a log as affecting the outcome reported in `payload-result`.
+
+Example:
+
+```text
+Device → Owner: payload-log-begin { 0: 40960, 1: "sha256", 3: true,
+                                    2: { "content_type": "text/plain",
+                                         "source": "installer" } }
+Owner → Device: payload-log-ack [true]
+Device → Owner: payload-log-data-0 .. payload-log-data-N
+Device → Owner: payload-log-end { 1: h'...' }
+Device → Owner: payload-result [2, "autoinstall failed; see log"]
+```
+
 ### fdo.payload:payload-result
 
 **Direction**: Device → Owner
 
 Reports the final status using the result array described earlier. Devices SHOULD include execution output (index 2) when available.
+
+This is the **terminal** message of a payload exchange. Owners MUST NOT consider the module complete until it has been received (or a local timeout expires) — see [Completion Ordering](chunking-strategy.md#completion-ordering).
 
 ### fdo.payload:error
 
