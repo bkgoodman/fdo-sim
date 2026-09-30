@@ -318,6 +318,22 @@ Owner → Device: payload-log-ack [false, 5, "Diagnostics not collected"]
 Device → Owner: payload-result [2, "autoinstall failed"]
 ```
 
+## Authorization of Begin Messages
+
+The `*-begin` message is the point at which a transfer is authorized. For FSIMs that deliver security-sensitive content -- bootable images (`fdo.bmo`), OS configuration bundles (`fdo.payload`), firmware parameters (`fdo.bmo:set`) -- the `*-begin` body is subject to **authorization** before the device accepts and acts on it.
+
+This chunking specification defines the transport mechanics (how bytes move). Authorization -- *who* is allowed to send *which* payload to *which* device -- is defined by the individual FSIM specifications that use this transport. However, all FSIMs that carry security-sensitive content share a common authorization framework with two modes:
+
+- **Channel authority**: The `*-begin` body is a bare CBOR value (map or array). Authorization comes from the TO2 session peer having proven it holds the Owner key or a Delegate certificate with appropriate permissions. No per-message signature is involved.
+
+- **Artifact authority**: The `*-begin` body is a `COSE_Sign1` envelope (CBOR tag 18) containing the bare value as its payload, signed by the Owner or an authorized Delegate. Authorization comes from the signature, which is verified against the TO2-proven Owner public key.
+
+The first byte of the `*-begin` body disambiguates: `0xD2` (CBOR tag 18) means artifact authority; any other valid CBOR head means channel authority.
+
+**This section is intentionally brief.** The full authorization model -- including scope constraints, delegate certificate validation, the no-downgrade rule, and the complete device verification algorithm -- is specified normatively in [fdo.bmo.md, "Authorization of Provisioning Messages"](fdo.bmo.md#authorization-of-provisioning-messages). For a high-level, user-oriented explanation of why these two modes exist and when to use each, see [Provisioning Security: Authorizing What Gets Installed on Your Devices](../../go-fdo/provisioning-security.md).
+
+Individual FSIMs reference this section and declare which of their messages are subject to authorization.
+
 ## Integration Notes
 
 - This strategy mirrors the patterns already proposed in `fdo.sysconfig` and other FSIM drafts but centralizes the rules so future modules stay consistent.

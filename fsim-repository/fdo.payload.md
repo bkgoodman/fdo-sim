@@ -601,6 +601,17 @@ If the client incorrectly determines that every offered payload is new (i.e., ne
 
 ## Security Considerations
 
+### Authorization of Payload Delivery
+
+The `fdo.payload` FSIM delivers OS configuration bundles, disk images, scripts, and other assets that are applied to a device during or after OS installation. Like `fdo.bmo`, these assets are security-sensitive: a compromised payload can take over a device.
+
+The authorization model for payload delivery follows the same two-mode framework defined for BMO in [chunking-strategy.md, "Authorization of Begin Messages"](chunking-strategy.md#authorization-of-begin-messages) and specified normatively in [fdo.bmo.md, "Authorization of Provisioning Messages"](fdo.bmo.md#authorization-of-provisioning-messages):
+
+- **Channel authority**: The `payload-begin` body is the bare CBOR map. The device accepts it because the TO2 peer proved it holds the Owner key or a Delegate certificate with provisioning permissions (PERM.7).
+- **Artifact authority**: The `payload-begin` body is a `COSE_Sign1` envelope (CBOR tag 18) wrapping the bare map, signed by the Owner or an authorized Delegate. The device verifies the signature against the TO2-proven Owner public key before accepting.
+
+For a high-level explanation of when to use each mode and how they relate to deployment architecture, see [Provisioning Security: Authorizing What Gets Installed on Your Devices](../../go-fdo/provisioning-security.md).
+
 ### Payload Validation
 
 - Devices MUST validate payload syntax before execution
