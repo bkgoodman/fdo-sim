@@ -117,6 +117,8 @@ Payload transfers use the generic `payload-begin` map from the chunking strategy
 
 All non-negative keys remain reserved for the generic chunking fields (`total_size`, `hash_alg`, `require_ack`, `estimated_duration`, etc.) as documented in `chunking-strategy.md`. In particular, senders of large payloads (e.g., ISO images) SHOULD include `estimated_duration` (key `4`) so that devices can adjust internal watchdog timers to avoid spurious resets during long transfers.
 
+**Delivery by reference.** `payload-begin` MAY use the generic delivery keys — `delivery_mode` (5), `url` (6), `tls_ca` (7), `expected_hash` (8), `meta_signer` (9) — to have the device fetch the payload from a URL or via a meta-payload instead of receiving it inline. Semantics, and the rules for authenticating fetched content, are defined in [chunking-strategy.md, Delivery Modes](chunking-strategy.md#delivery-modes). Support for modes 1 and 2 is OPTIONAL; a device that does not implement them rejects with error 14.
+
 ### PayloadResult
 
 Devices MUST send `fdo.payload:payload-result` after processing the payload. It follows the generic result array shape from the chunking strategy:
@@ -173,6 +175,7 @@ Error during payload transfer or processing.
 | 5 | Unsupported Feature | Payload uses features not supported by device |
 | 6 | Transfer Error | Error during data transfer (corruption, timeout) |
 | 7 | Resource Error | Insufficient resources (disk space, memory) |
+| 9–19 | *(generic)* | Delivery and authorization errors (URL fetch, TLS, hash mismatch, meta-payload, unsupported delivery mode, not authorized, scope, validity, superseded, unauthenticated source). See [chunking-strategy.md, Transfer Error Codes](chunking-strategy.md#transfer-error-codes). |
 
 ## Message Details
 
@@ -412,7 +415,7 @@ Version-based rejection is entirely optional and implementation-specific. Exampl
 
 - **OS packages**: Device checks whether the named package at the offered version is already installed
 - **Configuration files**: Device compares a version tag or checksum against what is currently deployed
-- **Client software updates**: Device compares its own version against the offered version (see [Client Update Payloads](#client-update-payloads))
+- **Client software updates**: Device compares its own version against the offered version (see [Client Update Payloads](#client-update-payloads-non-normative))
 - **Firmware images**: Device checks its current firmware version
 
 The interpretation of the `version` string is MIME-type-specific and left to the device's payload handler. Devices that do not implement version checking simply ignore the field and accept or reject the payload based on other criteria.
@@ -605,10 +608,20 @@ If the client incorrectly determines that every offered payload is new (i.e., ne
 
 The `fdo.payload` FSIM delivers OS configuration bundles, disk images, scripts, and other assets that are applied to a device during or after OS installation. Like `fdo.bmo`, these assets are security-sensitive: a compromised payload can take over a device.
 
-The authorization model for payload delivery follows the same two-mode framework defined for BMO in [chunking-strategy.md, "Authorization of Begin Messages"](chunking-strategy.md#authorization-of-begin-messages) and specified normatively in [fdo.bmo.md, "Authorization of Provisioning Messages"](fdo.bmo.md#authorization-of-provisioning-messages):
+The authorization model for payload delivery is specified normatively in [chunking-strategy.md, "Authorization of Begin Messages"](chunking-strategy.md#authorization-of-begin-messages):
 
-- **Channel authority**: The `payload-begin` body is the bare CBOR map. The device accepts it because the TO2 peer proved it holds the Owner key or a Delegate certificate with provisioning permissions (PERM.7).
-- **Artifact authority**: The `payload-begin` body is a `COSE_Sign1` envelope (CBOR tag 18) wrapping the bare map, signed by the Owner or an authorized Delegate. The device verifies the signature against the TO2-proven Owner public key before accepting.
+- **Channel authority**: The `payload-begin` body is the bare CBOR map. The device accepts it only because the TO2 peer proved it holds the Owner key or a Delegate chain granting `fdo-ekt-permit-provision` (PERM.7).
+- **Artifact authority**: The `payload-begin` body is a `COSE_Sign1` envelope (CBOR tag 18) wrapping the bare map, signed by the Owner or by a Delegate whose `x5chain` grants PERM.7. Any authorized onboarding peer — including one holding only onboard permissions — may relay it.
+
+`payload-begin` is **authorization-gated**: a device MUST reject an unsigned `payload-begin` from a peer without provisioning authority. Per [FSIM Declarations](chunking-strategy.md#fsim-declarations), `fdo.payload` declares:
+
+| Message | Inner payload (channel-authority form) | `content_type` | `external_aad` tag |
+| ------- | -------------------------------------- | -------------- | ------------------ |
+| `fdo.payload:payload-begin` | `PayloadBegin` map ([§PayloadBegin](#payloadbegin)) | `application/cbor+fdo.payload.payload-begin` | `"FDO-FSIM-PayloadProvision-v1"` |
+
+`fdo.payload` defines no meta-payload keys of its own.
+
+A device MAY, as a documented local policy, accept `payload-begin` for specific low-risk MIME types without provisioning authority. Such a policy MUST be explicit and documented, because for those types an onboard-only peer is effectively a provisioning authority (see [FSIM Declarations](chunking-strategy.md#fsim-declarations)).
 
 For a high-level explanation of when to use each mode and how they relate to deployment architecture, see [Provisioning Security: Authorizing What Gets Installed on Your Devices](../../go-fdo/provisioning-security.md).
 
@@ -728,7 +741,6 @@ Together, these FSIMs provide comprehensive device onboarding:
 
 Potential future enhancements (informative, not normative):
 
-- Payload signatures for verification
 - Compression support
 - Multi-part payloads
 - Payload dependencies
@@ -736,3 +748,5 @@ Potential future enhancements (informative, not normative):
 - Dry-run/validation mode
 
 These may be standardized in future revisions based on implementation experience.
+
+(Payload signatures, formerly listed here, are now specified: see [Authorization of Payload Delivery](#authorization-of-payload-delivery).)
