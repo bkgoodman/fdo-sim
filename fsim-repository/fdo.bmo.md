@@ -276,7 +276,7 @@ In no case does a failure in the envelope path permit the message to be reconsid
 | Key | Direction | Body on the wire | Purpose |
 | --- | --------- | ---------------- | ------- |
 | `fdo.bmo:set` | Owner → Device | Signed envelope, or bare `BiosParam` array (see below) | Instructs the device to apply one or more BIOS / firmware parameter changes (e.g. enable Secure Boot, set a BIOS password). Because accepting this message mutates firmware state, it is subject to [Authorization of Provisioning Messages](#authorization-of-provisioning-messages): normally a COSE_Sign1 envelope, or a bare array where the device permits channel authority. |
-| `fdo.bmo:response` | Device → Owner | CBOR array `[status, ?message]` (one per parameter), unsigned | Result of applying each parameter from the preceding `set`. |
+| `fdo.bmo:response` | Device → Owner | CBOR array `[status, ?message]`, unsigned — exactly **one per `set`** | Result of applying the preceding `set` as a whole. A `set` is atomic: see [Atomicity and Error Handling](#atomicity-and-error-handling). |
 
 #### Wire body of `fdo.bmo:set` — CDDL
 
@@ -429,39 +429,41 @@ Each pair is exactly two CBOR elements: parameter name (tstr) and parameter valu
 
 ### BiosResponse (response message)
 
-One CBOR response per parameter in the corresponding `set` message:
+Exactly one CBOR response for each `set` message, describing the outcome of the whole message:
 
 ```cbor
 [
   0,                    / status_code: 0=success, 1=warning, 2=error /
-  "Secure Boot enabled" / optional message /
+  "Applied 2 parameters" / optional message /
 ]
 ```
 
+| Status | Meaning |
+| ------ | ------- |
+| `0` success | Every parameter in the `set` was applied. |
+| `1` warning | Every parameter was applied; the message explains the caveat (for example, a reboot is required). |
+| `2` error | **No** parameter was applied. The message SHOULD identify the parameter or condition that caused the rejection. |
+
 ### Atomicity and Error Handling
 
-When a `set` message contains multiple parameters, firmware SHOULD apply them atomically (all-or-nothing):
+A `set` message is **atomic**: either every parameter in it takes effect, or none does. The device MUST NOT leave firmware in a state where only some of the parameters of one `set` have been applied.
 
-- If **any** parameter fails validation or application, **all** parameters in that message SHOULD be rolled back
-- This ensures the device is not left in a partially-configured state
+- The device MUST validate every parameter (name, value type and value) before applying any of them. A malformed or unsupported parameter rejects the whole message with status `2`.
+- If applying a parameter fails after others have been applied, the device MUST roll back the parameters it has applied, and respond with status `2`.
+- A device that cannot apply a multi-parameter `set` atomically MUST reject it with status `2`, without applying any parameter. Such a device may still accept a `set` containing a single parameter.
+- A device without a BIOS configuration interface MUST still respond, with status `2` (for example `"BIOS configuration not supported"`).
+- The device MUST send exactly one `fdo.bmo:response` for each `set` it receives, including when it rejects the message. (A `set` refused under [Authorization of Provisioning Messages](#authorization-of-provisioning-messages) is answered with `error` code 15 instead.)
+- The Owner MUST wait for the response to a `set` before considering the module complete, so that the result is not lost (see chunking-strategy.md "Completion Ordering").
 
-Because atomic behavior may be difficult to guarantee in all firmware implementations, **owners SHOULD issue single key-value commands** for critical settings. This allows:
-
-- Clear disambiguation of which parameter failed
-- Simpler error handling and retry logic
-- More predictable behavior across diverse firmware implementations
-
-**Recommended pattern for critical settings:**
+Grouping settings that depend on each other into one `set` is the intended use: for example, setting a BIOS password together with the Secure Boot state it protects, so the device is never left with one but not the other. Settings that are independent MAY be sent as separate `set` messages, which makes it easier to tell which one a device rejected:
 
 ```
-fdo.bmo:set = [["secure-boot", true]]
-fdo.bmo:response = [0, "Secure Boot enabled"]
+fdo.bmo:set = [["secure-boot", true], ["bios-password", "EnterpriseKey"]]
+fdo.bmo:response = [0, "Applied 2 parameters"]
 
-fdo.bmo:set = [["bios-password", "EnterpriseKey"]]
-fdo.bmo:response = [0, "Password set"]
+fdo.bmo:set = [["boot-order", "pxe,disk"]]
+fdo.bmo:response = [2, "boot-order: unsupported value; no parameters applied"]
 ```
-
-Rather than combining them in a single message.
 
 ## Authorization of Provisioning Messages
 
