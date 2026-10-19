@@ -84,6 +84,7 @@ The MIME type (`mime_type` in `fdo.payload`, `image_type` in `fdo.bmo`) provides
 | `fdo.payload:payload-log-ack` | Owner → Device | Array | Accept/reject the log before transfer |
 | `fdo.payload:payload-log-data-<n>` | Device → Owner | Byte string | Log data chunk `n` (0-based) |
 | `fdo.payload:payload-log-end` | Device → Owner | Map | Signals completion of the log transfer |
+| `fdo.payload:payload-log-result` | Owner → Device | Array | Owner's result for a standalone log transfer (see [Standalone Diagnostics](#standalone-diagnostics)) |
 | `fdo.payload:payload-result` | Device → Owner | Array | Final result with status/message |
 | `fdo.payload:error` | Device → Owner | Object | Error during transfer |
 <!-- markdownlint-enable MD033 -->
@@ -273,7 +274,7 @@ Transfers diagnostic output produced while applying the payload — installer lo
 
 The `message` field of `payload-result` is bounded by the negotiated MTU and is intended for a one-line summary. Anything larger belongs here.
 
-**Ordering**: the log transfer MUST complete before `payload-result` is sent. `payload-result` remains the terminal message of the exchange.
+**Ordering**: a log sent while applying a payload MUST complete before `payload-result` is sent. `payload-result` remains the terminal message of the exchange. (A device may also send a log not tied to any payload; see [Standalone Diagnostics](#standalone-diagnostics).)
 
 **Acknowledgment**: devices SHOULD set `require_ack` in `payload-log-begin`. An owner that does not collect diagnostics replies `payload-log-ack [false, 5, ...]` and the device proceeds directly to `payload-result`.
 
@@ -293,6 +294,41 @@ Owner → Device: payload-log-ack [true]
 Device → Owner: payload-log-data-0 .. payload-log-data-N
 Device → Owner: payload-log-end { 1: h'...' }
 Device → Owner: payload-result [2, "autoinstall failed; see log"]
+```
+
+### Standalone Diagnostics
+
+A payload's `payload-result` can only report what the device knew while the session was open. Often that is "staged": the payload was written where the next program will find it (an installer configuration, an install image), and the real outcome is known only later, to a different program, after the FDO client has exited. To report it, the device runs TO2 again, typically with credential reuse, and sends its output as a **standalone** `payload-log-*` transfer, as defined in [chunking-strategy.md, Standalone Diagnostic Transfers](chunking-strategy.md#standalone-diagnostic-transfers).
+
+- Owners implementing `fdo.payload` SHOULD support standalone diagnostic transfers. An owner that does not want a given log declines it with `payload-log-ack [false, 5]`.
+- Devices MAY send standalone diagnostics at any time, as often as their implementation needs: at implementation-defined steps of a multi-stage process, when something goes wrong, or once at the end. When and what to report is an implementation choice.
+- A device running only to report (a "report-only" session) SHOULD reject every `payload-begin` the owner offers at `payload-ack`, with reason 3 (Not Applicable), before any data is sent.
+- The device marks the transfer with `standalone: true` in the `payload-log-begin` metadata, and reports the outcome in the `payload-log-end` `status` (key 0).
+- The owner ends a standalone transfer with `payload-log-result`. A device MUST NOT consider its report delivered until it has received `payload-log-result [0]`.
+
+To tie a report to a payload delivered in an earlier session, the device SHOULD add these keys to the `metadata` map of `payload-log-begin`, alongside the generic ones (`standalone`, `content_type`, `source`, `phase`, ...):
+
+| Metadata key | Type | Description |
+| ------------ | ---- | ----------- |
+| `payload_name` | `tstr` | The `name` (key `-2`) of the earlier payload. |
+| `payload_version` | `tstr` | The `version` (key `-4`) of the earlier payload. |
+
+Example: an installer reports its outcome after the configuration it was given has been used.
+
+```text
+; New TO2 session (credential reuse), from the installer's completion hook
+Owner → Device: payload:active true
+Device → Owner: payload-log-begin { 1: "sha256", 3: true,
+                                    2: { "standalone": true,
+                                         "content_type": "text/plain",
+                                         "source": "installer",
+                                         "phase": "install",
+                                         "payload_name": "autoinstall.yaml",
+                                         "payload_version": "2026-10-14" } }
+Owner → Device: payload-log-ack [true]
+Device → Owner: payload-log-data-0 .. payload-log-data-N
+Device → Owner: payload-log-end { 0: 0, 1: h'...', 2: "install complete" }
+Owner → Device: payload-log-result [0]
 ```
 
 ### fdo.payload:payload-result

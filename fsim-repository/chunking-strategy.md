@@ -404,10 +404,16 @@ Where a receiver needs to return substantial diagnostic output — installer log
 
 Nothing in this document is direction-specific: `*-begin` / `*-data-<n>` / `*-end` are defined in terms of *sender* and *receiver*, not owner and device. A diagnostic transfer simply inverts those roles — the receiver of the primary payload becomes the sender of the log.
 
+A diagnostic transfer takes one of two forms:
+
+- **Nested** — sent while applying a primary payload, before that payload's `*-result`. The Requirements and Protocol Flow subsections below describe this form.
+- **Standalone** — sent by the device on its own initiative, not tied to any payload in the current session. See [Standalone Diagnostic Transfers](#standalone-diagnostic-transfers).
+
 ### Requirements
 
 - The `*-log` transfer MUST follow the ordinary begin/data/end rules defined above.
-- It MUST be sent **before** `*-result`, which remains the terminal message of the transfer (see [Result Is Terminal](#result-is-terminal)).
+- Diagnostic transfers are always inline. `*-log-begin` MUST NOT carry the delivery keys `5`–`9`.
+- A nested `*-log` transfer MUST be sent **before** `*-result`, which remains the terminal message of the transfer (see [Result Is Terminal](#result-is-terminal)).
 - The log sender SHOULD set `require_ack` in `*-log-begin`, allowing the peer to decline the transfer before any data is sent. Diagnostic output can be far larger than the payload that produced it, and a peer that will not retain it should not pay to receive it.
 - A peer that does not wish to receive the log responds `*-log-ack [false, 5]` (Diagnostics Not Requested). The log sender MUST then proceed directly to `*-result`.
 - Logs are supplementary. A device that cannot afford a chunked upload MUST still report `*-result` correctly. Implementations MUST NOT depend on the log transfer to determine success or failure.
@@ -421,14 +427,18 @@ The `*-log-begin` message uses only the generic keys defined in [Begin Message S
 | `content_type` | `tstr` | MIME type of the log, e.g. `"text/plain"`, `"application/json"`. Defaults to `"text/plain"` when absent. |
 | `truncated` | `bool` | True if the sender truncated the output to fit a local size cap. |
 | `source` | `tstr` | Origin of the output, e.g. `"stderr"`, `"journal"`, `"installer"`. |
+| `record_aligned` | `bool` | True if every `*-data-<n>` chunk holds only whole records of `content_type`. See [Record-Aligned Logs](#record-aligned-logs). Defaults to `false`. |
+| `standalone` | `bool` | True if this is a [standalone](#standalone-diagnostic-transfers) transfer. A device MUST set it to `true` in every standalone `*-log-begin` and MUST NOT set it to `true` in a nested one. Defaults to `false`. |
+| `phase` | `tstr` | Standalone transfers: an implementation-defined label for the stage or step the log describes, e.g. `"iso-mount"`, `"install"`, `"first-boot"`. |
 
-### Rejection Reason Code
+### Rejection Reason Codes
 
-This specification reserves one additional `*-ack` reason code for use with diagnostic transfers:
+This specification reserves these `*-log-ack` reason codes for use with diagnostic transfers:
 
 | Code | Meaning |
 | ---- | ------- |
 | 5 | Diagnostics not requested — the peer does not want the log |
+| 6 | Busy — another transfer of this FSIM is in progress; the device MAY send the log again once it completes (standalone transfers only) |
 
 ### Protocol Flow
 
@@ -456,6 +466,88 @@ Device → Owner: payload-log-begin { 0: 40960, 3: true, ... }
 Owner → Device: payload-log-ack [false, 5, "Diagnostics not collected"]
 Device → Owner: payload-result [2, "autoinstall failed"]
 ```
+
+### Record-Aligned Logs
+
+By default the chunks of a log are arbitrary slices of one byte stream, and the receiver can only interpret the log once it is complete. A sender MAY instead set `record_aligned: true` in the `metadata` map, meaning every `*-data-<n>` chunk contains one or more **complete records** of the declared `content_type` and never splits a record across chunks. What a record is follows from the content type, e.g. a line of `text/plain`, or one JSON text of `application/json-seq` or newline-delimited JSON.
+
+This section is informative except where it uses requirement keywords.
+
+- A receiver MAY process, display, or forward each chunk of a record-aligned log as it arrives, instead of waiting for `*-end`. Every chunk arrives over the authenticated TO2 channel, so its origin and integrity do not depend on the `*-end` hash.
+- A receiver MUST still treat the log as incomplete until `*-end` is received, and MUST verify any hash it carries.
+- A record-aligned log whose length is not known in advance (for example, output followed live while an activity runs) SHOULD omit `total_size`; the transfer is then open-ended until `*-end` (see [Length Handling](#length-handling)).
+- Such a log may have long gaps between chunks. A sender with nothing to send SHOULD wait until it has a record, rather than send empty ServiceInfo to keep the exchange moving. Long gaps are subject to the peer's session and transport timeouts, which the sender has no way to discover; senders SHOULD keep gaps short or send what they have and end the transfer.
+- A receiver that does not process records incrementally can ignore `record_aligned`; the log is still a valid log.
+
+### Standalone Diagnostic Transfers
+
+A device sometimes has diagnostic output that belongs to no payload in the current session. A typical case is an OS installer that runs *after* the FDO client has staged its configuration and exited: the client reported "staged", but the outcome of the install is only known later, to a different program. The device then runs TO2 again (usually with credential reuse) only to return that output. It may do so at any time: at implementation-defined steps of a multi-stage process, when something goes wrong, or once at the end.
+
+A standalone diagnostic transfer is a `*-log` transfer that the device starts itself.
+
+#### Applicability
+
+This mechanism is defined for **`fdo.payload`**, which SHOULD support it (see `fdo.payload`, Standalone Diagnostics). Other content-transferring FSIMs MAY adopt it where a device needs to report on work done outside a transfer — notably `fdo.bmo`, to report on a previous attempt (for example a failed chainload) when the device re-enters onboarding. It is not a general-purpose device-to-owner channel: other FSIMs SHOULD NOT adopt it without a specific need.
+
+#### Messages
+
+A standalone transfer uses the FSIM's `*-log-begin`, `*-log-ack`, `*-log-data-<n>` and `*-log-end` messages as defined above, plus one message that only occurs in this form:
+
+| Key | Direction | Type | Description |
+| --- | --------- | ---- | ----------- |
+| `*-log-result` | Owner → Device | Array | Terminal message: the owner's result for the standalone transfer, in the [Result Messages](#result-messages) format. |
+
+`*-log-result` status codes: `0` = log received and retained; `2` = log received but not retained (e.g. a storage failure). A device MAY delete a locally persisted copy of the log only after status `0`.
+
+#### Requirements
+
+- A transfer is **standalone** if and only if its `*-log-begin` carries `standalone: true` in the `metadata` map. An owner that receives a `*-log-begin` without it while no primary transfer of that FSIM is awaiting the device's `*-result` MUST decline it with `*-log-ack [false, 5]`.
+- A device MUST NOT start a standalone transfer until the owner has activated the FSIM (`<fsim>:active = true`).
+- Transfers within one FSIM are sequential. A device MUST NOT start a standalone transfer while a primary transfer is in progress, and an owner MUST NOT start a primary transfer while a standalone transfer is in progress.
+- Both sides may still send `*-begin` in the same round, before either has seen the other's. An owner that receives a standalone `*-log-begin` while a primary transfer of that FSIM is in progress MUST decline it with `*-log-ack [false, 6]` (Busy), and proceed with its own transfer. The device MAY send the log again after that transfer's `*-result`.
+- The device SHOULD set `require_ack`. An owner that does not want the log replies `*-log-ack [false, 5]`, which ends the transfer; no `*-log-result` follows.
+- The device reports the outcome of the activity the log describes in `*-log-end`: `status` (key 0) uses the `*-result` status codes (0 = success, 1 = warning, 2 = error), and `message` (key 2) MAY carry a one-line summary. An absent `status` means the outcome is not stated (e.g. a progress report). The outcome is carried at the end, not in `*-log-begin`, because a log that is followed live is only finished once the activity has ended.
+- After `*-log-end` the owner MUST send `*-log-result`. Per [Completion Ordering](#completion-ordering), the device MUST NOT treat the transfer as complete, or end the FSIM, until it has received `*-log-result` or a bounded local timeout has expired. A device MUST also apply a bounded timeout while awaiting `*-log-ack`, and treat expiry as a decline.
+- An owner that supports standalone transfers MUST NOT conclude the FSIM before it has processed the device's response to activation, and MUST NOT conclude it while a standalone transfer is in progress.
+- A device MAY send several standalone transfers in one session, one after another.
+- `*-log-begin` is **not** subject to [Authorization of Begin Messages](#authorization-of-begin-messages): that section governs content a device applies. The owner accepts a log on the strength of the device's TO2 attestation, and MUST treat its contents as untrusted data from that device, never as instructions.
+
+#### Owner Handling
+
+Owners SHOULD associate a standalone log with the device (its GUID) and record its `phase` and outcome (`*-log-end` status) when present, so that reports from successive sessions can be put in order. A device that wants to tie a report to a payload delivered in an earlier session SHOULD identify that payload in the `metadata` map, using the FSIM's own identifying fields (for `fdo.payload`, the payload's name and version).
+
+#### Protocol Flow
+
+A report-only session: the device has no interest in the owner's payloads and only returns its install log.
+
+```text
+; TO2 with credential reuse; devmod exchanged
+Owner → Device: payload:active true
+Device → Owner: payload-log-begin { 1: "sha256", 3: true,
+                                    2: { "standalone": true,
+                                         "content_type": "text/plain",
+                                         "source": "installer",
+                                         "phase": "install" } }
+Owner → Device: payload-log-ack [true]
+Device → Owner: payload-log-data-0 .. payload-log-data-N
+Device → Owner: payload-log-end { 0: 2, 1: h'...', 2: "install failed" }
+Owner → Device: payload-log-result [0]
+; device has nothing more to send; owner concludes the FSIM and TO2 ends normally
+```
+
+The same-round race: the owner offers a payload while the device starts its log.
+
+```text
+Owner → Device: payload-begin { ..., 3: true }
+Device → Owner: payload-log-begin { ..., 2: { "standalone": true, ... } }
+Owner → Device: payload-log-ack [false, 6, "Busy"]
+Device → Owner: payload-ack [false, 3]       ; or [true], then data, end, payload-result
+Device → Owner: payload-log-begin { ..., 2: { "standalone": true, ... } }   ; retry
+```
+
+The owner's transfer is over once it is rejected at `payload-ack`, or once the device sends its `payload-result`; the device retries after that.
+
+If the owner also offers payloads in such a session, a device that does not want them rejects them at `payload-ack` (e.g. reason 3, Not Applicable) before any data is sent.
 
 ## Authorization of Begin Messages
 
