@@ -78,7 +78,8 @@ signing key, so any software with TPM access could sign a forged
       the encrypted TO2 session, whose key exchange the Device Key
       signed), or should `qualifyingData` also include a value derived
       from the TO2 session?
-- [ ] **Trust anchor for the AK.** The Quote is only meaningful if the
+- [ ] **Trust anchor for the AK** (anchor order and demo status: see
+      "Trust anchor for the AK" below). The Quote is only meaningful if the
       Owner knows the AK is a genuine TPM key. Candidates, to be
       accepted side by side:
       - TPM vendor: EK certificate (TPM NV, or vendor online service for
@@ -126,6 +127,98 @@ signing key, so any software with TPM access could sign a forged
       an attestation exchange in front of it: Owner nonce -> Certify +
       Quote (nonce in `qualifyingData`) -> logs.
 
+## Trust anchor for the AK: demo status and the IAK path
+
+The Quote proves something only if the Owner knows the AK is a genuine
+TPM key in the TPM that holds the voucher's Device Key. The Owner gets
+there from one of these anchors, in order of preference:
+
+| # | Anchor | Voucher carries | At every TO2 | Status |
+|:--|:-------|:----------------|:-------------|:-------|
+| 1 | **IAK** (TCG): manufacturer-issued certificate for a persistent, restricted Initial Attestation Key | `PT_TPM_AK_CERT` (15) with the IAK certificate | Certify(Device Key by IAK) + Quote(IAK); no ActivateCredential, no fresh AK | Aspiration (below) |
+| 2 | **EK recorded by the manufacturer** at DI | `PT_TPM_EK_CERT` (14), or proposed `PT_TPM_EK_PUB` | fresh AK; MakeCredential to that EK / ActivateCredential; Certify + Quote | Demo works |
+| 3 | **EK certificate from a TPM vendor CA** the Owner trusts | nothing | as 2, EK from the device's certificate | Demo works |
+
+With no anchor the Owner reports the evidence as unverifiable (the demo
+fails the module). Anchors 1 and 2 put the trust in the manufacturer,
+whom the Owner already trusts through the voucher (the entry-0 signature
+covers `OVEExtraInfo`); no TPM vendor roots are needed, and they work for
+firmware TPMs whose EK certificate is not in NV.
+
+**The factory must check what it records.** FDO DI is one-way (the
+device's data goes into `DI.AppStart`, nothing comes back before the
+voucher is made), so the EK-to-Device-Key proof (MakeCredential /
+ActivateCredential plus Certify of the Device Key by an AK) cannot run
+inside DI. The station either runs it beside DI (a station that also
+drives the device, as quick-di does) or trusts its line; the appnote
+should say which the manufacturer vouches for.
+
+### Demo (2026-10-28, swtpm)
+
+- go-fdo branch `tpm-quote-demo`: `tpm/attest.go` (device steps and
+  verifier checks, shared by DI and TO2), example server `-tpm-quote`
+  [`-tpm-quote-ca`], example client device module,
+  `examples/tpm-quote-demo.sh`.
+- go-fdo-quick-di branch `tpm-quote-demo`: `-tpm-record-ek` checks the
+  EK-to-Device-Key binding (fresh AK certifies the DAK and activates a
+  credential made to the EK) and only then writes `PT_TPM_EK_CERT` into
+  `OVEExtraInfo` of the first voucher entry.
+- Results (16 checks): DI refuses to record another TPM's EK; the Owner
+  verifies the quote with the voucher's EK and no TPM CA; a changed PCR
+  shows in the next verified quote; stale nonce, another key certified,
+  altered quote and wrong activation secret are rejected at their
+  checks; without an EK in the voucher the vendor-CA path verifies, and
+  an untrusted CA or another TPM's EK certificate is rejected; a voucher
+  recording the wrong EK (factory check skipped) fails ActivateCredential.
+- Demo limits: RSA 2048 EK only, no event log, PCRs only as swtpm has
+  them (PCR 16 stands in for a measurement).
+
+### Long-term: IAK / IDevID (TCG "TPM 2.0 Keys for Device Identity and Attestation", v1.1, 2025)
+
+This is the standard form of what the demo does at every onboarding,
+done once by the OEM:
+
+- **Roles.** IDevID = unrestricted signing key for device identity;
+  IAK = restricted signing (attestation) key. These map onto the FDO
+  Device Key and the AK. The FDO TPM specification already lists
+  `DeviceKeyType` 1 = IDevID.
+- **OEM enrollment** (sections 6.1, 6.2) is the same proof: the CA
+  validates the EK certificate and the IAK attributes, uses
+  MakeCredential / ActivateCredential to confirm the IAK is in the TPM
+  with that EK, and the IAK certifies the IDevID (`TPM2_Certify`); the
+  OEM then issues IAK and IDevID certificates, which may also be stored
+  in TPM NV (7.4.3).
+- **Handles** (Table 2): IDevID `0x81020000`, IAK `0x81020001`, next to
+  FDO's Device Key `0x81020002` and HMAC key `0x81020003`; no collision.
+- **Device key cannot be the IAK:** the IAK is restricted (signs only
+  TPM-generated structures); the Device Key must sign FDO messages.
+
+What it would take:
+
+- Spec: the appnote's `PT_TPM_AK_CERT` (15) already allows "a
+  certificate or certification blob"; add that a TCG IAK certificate
+  goes there (no new identifier). This FSIM: anchor order above (IAK,
+  then EK in voucher, then vendor CA). TPM spec: note that a TCG
+  IDevID/IAK pair MAY serve as the Device Key and AK.
+- DI: create (or find) the persistent IAK, run the check, have the
+  manufacturer's CA issue the IAK certificate, record it.
+- TO2: skip the fresh AK and the activation round trip.
+
+Open questions for the IAK path:
+
+- [ ] IDevID template vs the FDO Device Key template. TCG recoverable
+      templates use `IDevIDKeyPolicy` = PolicyOR(PolicySecret(endorsement),
+      PolicyCommandCode(Certify), PolicyCommandCode(ActivateCredential),
+      PolicyAuthorizeNV delegation) and let the Privacy Administrator set
+      an authValue; FDO's Device Key uses PolicyCommandCode(Certify) and
+      empty-auth signing. Can an existing IDevID be the Device Key as is?
+- [ ] IAK certificate from the voucher or from TPM NV (or both, with the
+      voucher copy as the manufacturer's endorsement).
+- [ ] Whether the FDO manufacturer key and the OEM IAK CA are the same
+      trust root, and what the Owner checks when they are not.
+- [ ] Devices that already carry IDevID/IAK from the OEM before FDO DI:
+      reuse them instead of creating a new Device Key.
+
 ## Proposals for the Device Manufacturing Info appnote
 
 `fdo-appnote-device-mfg-info.bs` (branch `bgoodman-di-standarization`)
@@ -153,7 +246,7 @@ FSIM. To make the DI-time data a usable anchor for it:
       vendor roots can check the binding themselves.
 - [ ] **IAK:** mention the TCG Initial Attestation Key certificate as a
       form of `PT_TPM_AK_CERT`; quotes signed by an IAK need no
-      ActivateCredential round trip.
+      ActivateCredential round trip. See "Long-term: IAK / IDevID" above.
 - [ ] **Baseline = the DI event log, compared by events.** The DI-time
       `PT_TPM_QUOTE` reflects the factory boot; by TO2 the PCRs have been
       extended further (field OS). Final PCR values then differ even when
@@ -184,3 +277,6 @@ FSIM. To make the DI-time data a usable anchor for it:
   `TPM2_MakeCredential`, `TPM2_ActivateCredential`,
   `TPM2_PolicyCommandCode`
 - TCG PC Client Platform Firmware Profile (event log)
+- TCG TPM 2.0 Keys for Device Identity and Attestation, v1.1 (2025):
+  IDevID/IAK, OEM enrollment, persistent handles
+- TCG EK Credential Profile (EK certificate NV indices)
