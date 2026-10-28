@@ -170,8 +170,21 @@ should say which the manufacturer vouches for.
   checks; without an EK in the voucher the vendor-CA path verifies, and
   an untrusted CA or another TPM's EK certificate is rejected; a voucher
   recording the wrong EK (factory check skipped) fails ActivateCredential.
-- Demo limits: RSA 2048 EK only, no event log, PCRs only as swtpm has
-  them (PCR 16 stands in for a measurement).
+- **Real TPM (K800, Intel PTT, Alder Lake firmware TPM), 2026-10-29:**
+  quick-di DI refuses another TPM's EK and records the PTT's own; TO2
+  verifies with the voucher's EK and no CA, over real measured-boot PCRs
+  0-7; stale nonce, other key certified, altered quote, wrong secret and a
+  voucher recording the wrong EK are rejected at their checks. The vendor
+  path also works with Intel's real chain: EK certificate -> PTT, Kernel
+  and ROM CAs (stored in TPM NV at 0x01C00100) -> ODCA issuing and
+  intermediate CAs (downloaded via AIA from tsci.intel.com) -> Intel OnDie
+  CA root; an untrusted CA is rejected.
+- Real-TPM differences found: the EK is not persisted (recreated from the
+  TCG default template, which matches the certificate), and the vendor's
+  intermediate CAs live in the EK chain NV indices, so the device sends
+  them with the EK certificate.
+- Demo limits: RSA 2048 EK only, no event log; on swtpm, PCR 16 stands in
+  for a measurement.
 
 ### Long-term: IAK / IDevID (TCG "TPM 2.0 Keys for Device Identity and Attestation", v1.1, 2025)
 
